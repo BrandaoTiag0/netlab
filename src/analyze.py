@@ -12,7 +12,7 @@ Uso: py src/analyze.py caminho/para/ficheiro.pcap
 import sys
 from collections import Counter, defaultdict
 
-from scapy.all import rdpcap, IP, TCP, UDP, DNS, DNSQR
+from scapy.all import rdpcap, IP, TCP, DNS, DNSQR
 
 
 def top_ips(pacotes, top_n=10):
@@ -30,7 +30,7 @@ def top_ips(pacotes, top_n=10):
 def dominios_contactados(pacotes, top_n=15):
     dominios = Counter()
     for pacote in pacotes:
-        if pacote.haslayer(DNSQR) and pacote[DNS].qr == 0:  # qr=0 -> é um pedido
+        if pacote.haslayer(DNS) and pacote.haslayer(DNSQR) and pacote[DNS].qr == 0:  # qr=0 -> é um pedido
             nome = pacote[DNSQR].qname.decode(errors="ignore").rstrip(".")
             dominios[nome] += 1
 
@@ -43,16 +43,23 @@ def dominios_contactados(pacotes, top_n=15):
 
 def possivel_port_scan(pacotes, limite_portas=15):
     """
-    Um IP a falar com muitas portas de destino diferentes (no mesmo ou em
-    poucos destinos) é o padrão clássico de port scan.
+    Um IP a INICIAR ligações (pacotes SYN, sem ACK) para muitas portas de
+    destino diferentes é o padrão clássico de port scan.
+
+    Nota: só contamos SYN puro (pedido de ligação), não SYN-ACK nem ACK.
+    Contar todos os pacotes TCP/UDP dava falsos positivos: um servidor DNS
+    a responder a muitos clientes em portas efémeras diferentes parecia
+    "portas diferentes", mas é só ele a responder, não a tentar ligar-se.
     """
     portas_por_origem = defaultdict(set)
 
     for pacote in pacotes:
-        if IP in pacote and (TCP in pacote or UDP in pacote):
-            origem = pacote[IP].src
-            porta_destino = pacote[TCP].dport if TCP in pacote else pacote[UDP].dport
-            portas_por_origem[origem].add(porta_destino)
+        if IP in pacote and TCP in pacote:
+            flags = pacote[TCP].flags
+            eh_syn_puro = "S" in flags and "A" not in flags
+            if eh_syn_puro:
+                origem = pacote[IP].src
+                portas_por_origem[origem].add(pacote[TCP].dport)
 
     suspeitos = {ip: portas for ip, portas in portas_por_origem.items() if len(portas) >= limite_portas}
 
