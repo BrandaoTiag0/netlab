@@ -14,6 +14,7 @@ Usage: python src/analyze.py path/to/file.pcap
 import math
 import statistics
 import sys
+import ipaddress
 from collections import Counter, defaultdict
 
 from scapy.all import rdpcap, IP, TCP, DNS, DNSQR
@@ -74,44 +75,57 @@ def possible_port_scan(packets, port_threshold=15):
         print(f"  {ip:<20} tried {len(ports)} different ports")
 
 
-def possible_beaconing(packets, min_events=6, min_avg_interval=5.0, cv_threshold=0.2, top_n=5):
+def possible_beaconing(packets, min_events=10, min_avg_interval=5.0, top_n=5, tolerance=0.10, min_regularity=0.5):
     """
     Beaconing: malware "phoning home" to a C2 server at very regular
     intervals (e.g. every 60s), because it's a program running on a timer,
     not a person clicking around. Human traffic is irregular.
 
-    For each (source, destination, destination port) triplet, we look at
-    every TCP packet (not just SYN): malware can beacon either by opening a
-    new connection each time, or by keeping a single connection open and
-    sending periodic heartbeats inside it. An earlier SYN-only version of
-    this detector missed the second case entirely - it borrowed the SYN
-    filter from possible_port_scan(), but that filter solves a problem
-    (servers replying from many ephemeral ports) that doesn't apply here.
+    For each (source, destination, destination port) triplet we look at TCP
+    packets that either carry a payload or are a SYN, and whose destination
+    is a global IP address (is_global). Pure ACKs and other empty packets
+    are ignored: malware can beacon by opening a new connection each time
+    (SYN) or by sending periodic heartbeats inside a long-lived connection
+    (payload).
 
     Packets less than 1s apart are collapsed into a single "event", so a
     burst of several packets from the same beacon doesn't get counted as
     several close-together events and fake a short interval.
 
-    We then measure the coefficient of variation (CV) of the intervals
-    between events: CV = stdev(intervals) / mean(intervals). A CV close to 0
-    means the intervals are nearly identical -> regular -> suspicious.
+    We then measure regularity around the median interval between events:
+    the percentage of intervals within +/- `tolerance` (relative) of the
+    median. A value close to 100% means nearly all intervals are the same ->
+    regular -> suspicious. The median (rather than the mean) keeps a few
+    long gaps, e.g. the host being offline, from hiding a real beacon.
+    The coefficient of variation (CV = stdev / mean of the intervals) is
+    also reported, as a secondary figure and as a tie-breaker when sorting.
 
     Filters, to avoid noise:
     - min_events: need enough events for the statistics to mean
       anything (with too few samples, everything looks "regular").
-    - min_avg_interval: ignores fast, bursty traffic (e.g. a page loading
-      several resources in under a second) that isn't a beaconing pattern.
-    - cv_threshold: how regular the intervals need to be to count as
-      suspicious.
+    - min_avg_interval: minimum median interval, in seconds. Ignores fast,
+      bursty traffic (e.g. a page loading several resources in under a
+      second) that isn't a beaconing pattern.
+    - tolerance: how far from the median an interval can be, as a fraction
+      of the median, and still count as "close".
+    - min_regularity: minimum fraction of intervals that must be close to
+      the median for the destination to be flagged as suspicious.
+    - top_n: how many destinations to list in the informational ranking.
     """
     timestamps_by_triplet = defaultdict(list)
-
     for packet in packets:
         if IP in packet and TCP in packet:
+            # Only packets with payload, or SYNs (new connections).
+            payload_len = packet[IP].len - packet[IP].ihl * 4 - packet[TCP].dataofs * 4
+            if payload_len == 0 and "S" not in packet[TCP].flags:
+                continue
+            # Only traffic to globally routable destinations.
+            if not ipaddress.ip_address(packet[IP].dst).is_global:
+                continue
             key = (packet[IP].src, packet[IP].dst, packet[TCP].dport)
             timestamps_by_triplet[key].append(float(packet.time))
 
-    qualifying = []  # (key, connection_count, avg_interval, cv)
+    qualifying = []  # (key, event_count, median_interval, cv, regularity)
 
     for key, times in timestamps_by_triplet.items():
         times.sort()
@@ -126,31 +140,33 @@ def possible_beaconing(packets, min_events=6, min_avg_interval=5.0, cv_threshold
             continue
 
         intervals = [deduped[i] - deduped[i - 1] for i in range(1, len(deduped))]
-        avg_interval = statistics.mean(intervals)
-        if avg_interval < min_avg_interval:
+        median_interval = statistics.median(intervals)
+        if median_interval < min_avg_interval:
             continue
 
-        stdev = statistics.stdev(intervals)
-        cv = stdev / avg_interval
-        qualifying.append((key, len(deduped), avg_interval, cv))
+        cv = statistics.stdev(intervals) / statistics.mean(intervals)
+        close = [x for x in intervals if abs(x - median_interval) <= tolerance * median_interval]
+        regularity = len(close) / len(intervals)
+        qualifying.append((key, len(deduped), median_interval, cv, regularity))
 
-    suspicious = [r for r in qualifying if r[3] <= cv_threshold]
+    suspicious = [r for r in qualifying if r[4] >= min_regularity]
 
     print(f"\nPossible beaconing (>= {min_events} events, "
-          f"avg interval >= {min_avg_interval}s, CV <= {cv_threshold}):")
+          f"median interval >= {min_avg_interval}s, "
+          f"regularity >= {min_regularity:.0%} of intervals within +/-{tolerance:.0%} of the median):")
     if not suspicious:
         print("  (nothing found with these parameters)")
-    for (src, dst, port), n, avg_interval, cv in sorted(suspicious, key=lambda r: r[3]):
+    for (src, dst, port), n, median_interval, cv, regularity in sorted(suspicious, key=lambda r: (-r[4], r[3])):
         print(f"  {src:<15} -> {dst:<15}:{port:<6} {n} events, "
-              f"avg interval {avg_interval:.1f}s, CV {cv:.2f}")
+              f"median interval {median_interval:.1f}s, regularity {regularity:.0%}, CV {cv:.2f}")
 
-    print(f"\nTop {top_n} most regular destinations (lowest CV, informational):")
+    print(f"\nTop {top_n} most regular destinations (highest regularity, informational):")
     if not qualifying:
         print("  (not enough qualifying events)")
     else:
-        for (src, dst, port), n, avg_interval, cv in sorted(qualifying, key=lambda r: r[3])[:top_n]:
+        for (src, dst, port), n, median_interval, cv, regularity in sorted(qualifying, key=lambda r: (-r[4], r[3]))[:top_n]:
             print(f"  {src:<15} -> {dst:<15}:{port:<6} {n} events, "
-                  f"avg interval {avg_interval:.1f}s, CV {cv:.2f}")
+                  f"median interval {median_interval:.1f}s, regularity {regularity:.0%}, CV {cv:.2f}")
 
 
 def _shannon_entropy(s):
