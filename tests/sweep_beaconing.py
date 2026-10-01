@@ -24,7 +24,7 @@ def flagged(packets, tolerance, min_regularity):
         possible_beaconing(packets, tolerance=tolerance, min_regularity=min_regularity)
     lines = buf.getvalue().splitlines()
     start = next(i for i, l in enumerate(lines) if l.startswith("Possible beaconing"))
-    end = next(i for i, l in enumerate(lines) if l.startswith("Top "))
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
     return [f"{m[1]} -> {m[2]}:{m[3]}" for l in lines[start + 1:end] if (m := LINE.match(l))]
 
 
