@@ -75,7 +75,7 @@ def possible_port_scan(packets, port_threshold=15):
         print(f"  {ip:<20} tried {len(ports)} different ports")
 
 
-def possible_beaconing(packets, min_events=10, min_avg_interval=5.0, top_n=5, tolerance=0.10, min_regularity=0.5):
+def possible_beaconing(packets, min_events=10, min_avg_interval=5.0, top_n=5, tolerance=0.25, min_regularity=0.6):
     """
     Beaconing: malware "phoning home" to a C2 server at very regular
     intervals (e.g. every 60s), because it's a program running on a timer,

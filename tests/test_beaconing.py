@@ -35,7 +35,22 @@ def test_clean_traffic_flags_nothing():
     assert section == ["  (nothing found with these parameters)"], section
 
 
+def test_amos_polling_is_flagged():
+    section = suspicious_section("2026-09-10-AMOS-Stealer-infection-traffic.pcap")
+    assert any("10.9.10.26" in l and "165.22.199.85" in l and ":80 " in l
+               for l in section), section
+
+
+def test_jitter_beacons_are_flagged():
+    section = suspicious_section("jitter.pcap")
+    for n in range(35, 40):
+        assert any("192.168.1.30" in l and f"93.184.216.{n} " in l and ":7007" in l
+                   for l in section), (n, section)
+
+
 if __name__ == "__main__":
     test_synthetic_beacon_is_flagged()
     test_clean_traffic_flags_nothing()
-    print("OK: 2 tests passed")
+    test_amos_polling_is_flagged()
+    test_jitter_beacons_are_flagged()
+    print("OK: 4 tests passed")
