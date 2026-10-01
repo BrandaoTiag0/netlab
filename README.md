@@ -10,7 +10,7 @@ Fed with real malware infection captures (source: [malware-traffic-analysis.net]
 - [x] List contacted domains (DNS)
 - [x] Port scan detector
 - [x] Beaconing detector (coefficient of variation of packet intervals)
-- [ ] DNS tunneling detector
+- [x] DNS tunneling detector (subdomain length + Shannon entropy)
 
 ## Usage
 
@@ -38,3 +38,5 @@ Source: [malware-traffic-analysis.net, 2026-02-28](https://www.malware-traffic-a
 **Beaconing confirmed:** with that fix, the detector catches `10.2.28.88 <-> 45.131.214.85:443` with textbook precision - 261 events, average interval 60.1s, CV 0.00. That's the NetSupport RAT's C2 "phoning home" on an almost perfectly constant rhythm. It independently confirms what the exercise already stated about this IP being malicious, but now there's a number (near-zero CV) that proves it statistically rather than "because the site said so".
 
 **Bonus finding - a reminder that regularity isn't proof of malice:** the detector also flagged `104.208.203.89` (a Microsoft/Azure-range IP) with similarly regular intervals (CV 0.06-0.23, every ~4 minutes). This is very likely legitimate background telemetry or update-check traffic, not malware. Statistical regularity narrows down what to look at - it doesn't replace checking who the destination actually is.
+
+**DNS tunneling detector - tuning lesson:** this exercise has no actual tunneling, so the detector was first validated against synthetic data: random 45-character subdomains under a fake C2 domain (the tunneling case) alongside long, CDN-style hostnames like `cdn-edge-server-cluster-N.contentdelivery.example.com` under a normal domain (a deliberately tricky "legit but long" case). A first pass with `min_entropy=3.5` flagged *both* as suspicious - the CDN-style names are verbose, not random, but 3.5 bits/char wasn't a high enough bar to tell the difference (entropy 3.81). Raising the threshold to `4.0` fixed it: the CDN-style domain now only shows up in the informational top-10 (not flagged), while the real tunneling case stays flagged (entropy 4.51). Run against the NetSupport RAT capture itself: nothing flagged - correctly, since there's no tunneling here - and the real domains involved (microsoft.com, easyas123.tech, mshome.net, msn.com, microsoftonline.com) all score low entropy (1.58-2.80 bits/char), consistent with ordinary traffic. A useful reminder that a detector needs to be tested against both a true positive and a tricky near-miss, not just real-world "nothing happens" data.

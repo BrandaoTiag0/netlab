@@ -6,10 +6,12 @@ Layers implemented:
   2. Contacted domains (DNS queries)
   3. Port scan signals (one IP trying many different destination ports)
   4. Beaconing signals (regular connection intervals to the same destination)
+  5. DNS tunneling signals (long, high-entropy subdomains under one base domain)
 
 Usage: python src/analyze.py path/to/file.pcap
 """
 
+import math
 import statistics
 import sys
 from collections import Counter, defaultdict
@@ -151,6 +153,73 @@ def possible_beaconing(packets, min_events=6, min_avg_interval=5.0, cv_threshold
                   f"avg interval {avg_interval:.1f}s, CV {cv:.2f}")
 
 
+def _shannon_entropy(s):
+    """Bits of entropy per character. Real words/hostnames score low
+    (repeated letters, limited alphabet); random/base32/base64-looking
+    strings score high (close to log2(alphabet size))."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    length = len(s)
+    return -sum((c / length) * math.log2(c / length) for c in counts.values())
+
+
+def possible_dns_tunneling(packets, min_queries=20, min_avg_label_length=30, min_entropy=4.0, top_n=10):
+    """
+    DNS tunneling hides data - or a whole C2 channel - inside DNS queries,
+    usually as a long, random-looking subdomain of a domain the attacker
+    controls, e.g. "dGhpcyBpcyBhIHNlY3JldA.evil.com" instead of
+    "www.evil.com". Two signals catch this:
+      - the subdomain is long (real hostnames are rarely 40+ characters)
+      - the subdomain looks random: high Shannon entropy, unlike real
+        words or hostnames, which repeat common letters and patterns
+
+    We group queries by "base domain" (the last two labels - "evil.com"
+    out of "xyz.evil.com") and flag a base domain once it has enough
+    queries, a high average subdomain length, AND high average entropy.
+    Requiring all three keeps us from flagging domains that are merely
+    long (some legitimate CDN/tracking hostnames are) but not random.
+    """
+    subdomains_by_base = defaultdict(list)
+
+    for packet in packets:
+        if packet.haslayer(DNS) and packet.haslayer(DNSQR) and packet[DNS].qr == 0:
+            name = packet[DNSQR].qname.decode(errors="ignore").rstrip(".")
+            labels = name.split(".")
+            if len(labels) <= 2:
+                continue  # no subdomain to analyze, just "domain.tld"
+            base_domain = ".".join(labels[-2:])
+            subdomain = ".".join(labels[:-2])
+            subdomains_by_base[base_domain].append(subdomain)
+
+    results = []  # (base_domain, query_count, avg_length, avg_entropy, unique_ratio)
+
+    for base_domain, subdomains in subdomains_by_base.items():
+        if len(subdomains) < min_queries:
+            continue
+        avg_length = statistics.mean(len(s) for s in subdomains)
+        avg_entropy = statistics.mean(_shannon_entropy(s) for s in subdomains)
+        unique_ratio = len(set(subdomains)) / len(subdomains)
+        results.append((base_domain, len(subdomains), avg_length, avg_entropy, unique_ratio))
+
+    suspicious = [r for r in results if r[2] >= min_avg_label_length and r[3] >= min_entropy]
+
+    print(f"\nPossible DNS tunneling (>= {min_queries} queries, "
+          f"avg subdomain length >= {min_avg_label_length}, avg entropy >= {min_entropy} bits/char):")
+    if not suspicious:
+        print("  (nothing found with these parameters)")
+    for base_domain, n, avg_length, avg_entropy, unique_ratio in sorted(suspicious, key=lambda r: -r[3]):
+        print(f"  {base_domain:<30} {n} queries, avg length {avg_length:.1f}, "
+              f"avg entropy {avg_entropy:.2f} bits/char, {unique_ratio:.0%} unique")
+
+    print(f"\nTop {top_n} base domains by subdomain query volume (informational):")
+    if not results:
+        print("  (no domains with subdomains found)")
+    for base_domain, n, avg_length, avg_entropy, unique_ratio in sorted(results, key=lambda r: -r[1])[:top_n]:
+        print(f"  {base_domain:<30} {n} queries, avg length {avg_length:.1f}, "
+              f"avg entropy {avg_entropy:.2f} bits/char")
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: python src/analyze.py path/to/file.pcap")
@@ -163,3 +232,4 @@ if __name__ == "__main__":
     contacted_domains(packets)
     possible_port_scan(packets)
     possible_beaconing(packets)
+    possible_dns_tunneling(packets)
