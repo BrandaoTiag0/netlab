@@ -18,7 +18,7 @@ import statistics
 import ipaddress
 from collections import Counter, defaultdict
 
-from scapy.all import rdpcap, IP, TCP, DNS, DNSQR
+from scapy.all import rdpcap, IP, TCP, DNS, DNSQR, DNSRR
 
 
 def top_ips(packets, top_n=10):
@@ -379,6 +379,48 @@ def possible_dns_tunneling(packets, min_queries=20, min_avg_label_length=30, min
               f"avg entropy {avg_entropy:.2f} bits/char")
 
 
+def ip_without_dns(packets):
+    """
+    Malware often connects straight to a hard-coded IP, with no DNS lookup
+    beforehand, whereas normal software resolves a name first. We walk the
+    packets in order, remember every IP that appeared in a DNS A-record answer,
+    and flag each pure SYN (flags == "S") to a public IP that has not been
+    resolved yet. SYNs are counted per (src, dst, dport).
+    """
+    counts = Counter()
+    for packet in packets:
+        if IP in packet:
+            counts[packet[IP].src] += 1
+            counts[packet[IP].dst] += 1
+    local_host = counts.most_common(1)[0][0] if counts else None
+
+    resolved = set()
+    syns = Counter()
+    inbound_ignored = 0
+
+    for packet in packets:
+        if DNS in packet and packet[DNS].qr == 1:
+            dns = packet[DNS]
+            for rr in dns.an or []:
+                if isinstance(rr, DNSRR) and rr.type == 1:
+                    resolved.add(rr.rdata)
+        elif IP in packet and TCP in packet and packet[TCP].flags == "S":
+            if packet[IP].src != local_host:
+                inbound_ignored += 1
+                continue
+            dst = packet[IP].dst
+            if ipaddress.ip_address(dst).is_global and dst not in resolved:
+                syns[(packet[IP].src, dst, packet[TCP].dport)] += 1
+
+    print("\nConnections to IPs without prior DNS:")
+    if not syns:
+        print("  (nothing found)")
+    for (src, dst, dport), n in syns.most_common():
+        unusual = "  [unusual port]" if dport not in (80, 443) else ""
+        print(f"  {src:<15} -> {dst}:{dport}  {n} SYNs{unusual}")
+    print(f"  ({inbound_ignored} inbound SYNs ignored; local host = {local_host})")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="netlab - network traffic analyzer")
     parser.add_argument("pcap", help="path to a .pcap file")
@@ -396,3 +438,4 @@ if __name__ == "__main__":
     possible_port_scan(packets)
     possible_beaconing(packets, home_nets=args.home_net)
     possible_dns_tunneling(packets)
+    ip_without_dns(packets)

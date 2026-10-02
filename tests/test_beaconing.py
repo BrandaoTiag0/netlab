@@ -108,6 +108,14 @@ def test_home_net_option_makes_public_server_ours():
     assert not any("115.231.78.11" in l for l in section("direction.pcap", OUTBOUND, home))
 
 
+def test_public_server_scanners_are_inbound_not_beaconing():
+    """2026-03-17: a week of internet scans hitting one public web server."""
+    name = "2026-03-17-seven-days-of-scans-and-probes-and-web-traffic-hitting-my-web-server.pcap"
+    home = parse_home_nets("203.161.44.208")
+    assert section(name, OUTBOUND, home) == ["  (nothing found with these parameters)"]
+    assert has(section(name, INBOUND, home), "95.214.52.233", "203.161.44.208", 3629)
+
+
 def test_warning_when_no_host_is_home():
     lines = run("direction.pcap", parse_home_nets("172.31.99.0/24"))
     assert any("WARNING: no host in this capture is in the home network" in l for l in lines), lines
